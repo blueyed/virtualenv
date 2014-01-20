@@ -2,7 +2,7 @@
 """Create a "virtual" Python installation
 """
 
-__version__ = "1.11.dev1"
+__version__ = "1.12.dev1"
 virtualenv_version = __version__  # legacy
 
 import base64
@@ -28,10 +28,6 @@ if sys.version_info < (2, 6):
     print('ERROR: this script requires Python 2.6 or greater.')
     sys.exit(101)
 
-try:
-    set
-except NameError:
-    from sets import Set as set
 try:
     basestring
 except NameError:
@@ -117,8 +113,6 @@ if majver == 2:
         REQUIRED_MODULES.extend(['warnings', 'linecache', '_abcoll', 'abc'])
     if minver >= 7:
         REQUIRED_MODULES.extend(['_weakrefset'])
-    if minver <= 3:
-        REQUIRED_MODULES.extend(['sets', '__future__'])
 elif majver == 3:
     # Some extra modules are needed for Python 3, but different ones
     # for different versions.
@@ -285,8 +279,8 @@ elif majver == 3:
             #"xmlrpc",
             #"zipfile",
         ])
-if minver >= 4:
-    REQUIRED_MODULES.extend(['operator'])
+    if minver >= 4:
+        REQUIRED_MODULES.extend(['operator', '_collections_abc'])
 
 if is_pypy:
     # these are needed to correctly display the exceptions that may happen
@@ -648,14 +642,14 @@ def main():
         action='count',
         dest='verbose',
         default=0,
-        help="Increase verbosity")
+        help="Increase verbosity.")
 
     parser.add_option(
         '-q', '--quiet',
         action='count',
         dest='quiet',
         default=0,
-        help='Decrease verbosity')
+        help='Decrease verbosity.')
 
     parser.add_option(
         '-p', '--python',
@@ -669,49 +663,47 @@ def main():
         '--clear',
         dest='clear',
         action='store_true',
-        help="Clear out the non-root install and start from scratch")
+        help="Clear out the non-root install and start from scratch.")
 
     parser.set_defaults(system_site_packages=False)
     parser.add_option(
         '--no-site-packages',
         dest='system_site_packages',
         action='store_false',
-        help="Don't give access to the global site-packages dir to the "
-             "virtual environment (default)")
+        help="DEPRECATED. Retained only for backward compatibility. "
+             "Not having access to global site-packages is now the default behavior.")
 
     parser.add_option(
         '--system-site-packages',
         dest='system_site_packages',
         action='store_true',
-        help="Give access to the global site-packages dir to the "
-             "virtual environment")
+        help="Give the virtual environment access to the global site-packages.")
 
     parser.add_option(
         '--always-copy',
         dest='symlink',
         action='store_false',
         default=True,
-        help="Always copy files rather than symlinking")
+        help="Always copy files rather than symlinking.")
 
     parser.add_option(
         '--unzip-setuptools',
         dest='unzip_setuptools',
         action='store_true',
-        help="Unzip Setuptools when installing it")
+        help="Unzip Setuptools when installing it.")
 
     parser.add_option(
         '--relocatable',
         dest='relocatable',
         action='store_true',
-        help='Make an EXISTING virtualenv environment relocatable.  '
-        'This fixes up scripts and makes all .pth files relative')
+        help='Make an EXISTING virtualenv environment relocatable. '
+             'This fixes up scripts and makes all .pth files relative.')
 
     parser.add_option(
         '--no-setuptools',
         dest='no_setuptools',
         action='store_true',
-        help='Do not install setuptools (or pip) '
-        'in the new virtualenv.')
+        help='Do not install setuptools (or pip) in the new virtualenv.')
 
     parser.add_option(
         '--no-pip',
@@ -724,36 +716,35 @@ def main():
         '--extra-search-dir',
         dest="search_dirs",
         action="append",
+        metavar='DIR',
         default=default_search_dirs,
         help="Directory to look for setuptools/pip distributions in. "
-        "You can add any number of additional --extra-search-dir paths.")
+              "This option can be used multiple times.")
 
     parser.add_option(
         '--never-download',
         dest="never_download",
         action="store_true",
         default=True,
-        help="Never download anything from the network. This is now always "
-        "the case. The option is only retained for backward compatibility, "
-        "and does nothing. Virtualenv will fail if local distributions "
-        "of setuptools/pip are not present.")
+        help="DEPRECATED. Retained only for backward compatibility. This option has no effect. "
+              "Virtualenv never downloads pip or setuptools.")
 
     parser.add_option(
         '--prompt',
         dest='prompt',
-        help='Provides an alternative prompt prefix for this environment')
+        help='Provides an alternative prompt prefix for this environment.')
 
     parser.add_option(
         '--setuptools',
         dest='setuptools',
         action='store_true',
-        help="Backward compatibility. Does nothing.")
+        help="DEPRECATED. Retained only for backward compatibility. This option has no effect.")
 
     parser.add_option(
         '--distribute',
         dest='distribute',
         action='store_true',
-        help="Backward compatibility. Does nothing.")
+        help="DEPRECATED. Retained only for backward compatibility. This option has no effect.")
 
     if 'extend_parser' in globals():
         extend_parser(parser)
@@ -909,34 +900,59 @@ def filter_install_output(line):
         return Logger.INFO
     return Logger.DEBUG
 
-def install_sdist(project_name, sdist, py_executable, search_dirs=None):
+def find_wheels(projects, search_dirs):
+    """Find wheels from which we can import PROJECTS.
 
+    Scan through SEARCH_DIRS for a wheel for each PROJECT in turn. Return
+    a list of the first wheel found for each PROJECT
+    """
+
+    wheels = []
+
+    # Look through SEARCH_DIRS for the first suitable wheel. Don't bother
+    # about version checking here, as this is simply to get something we can
+    # then use to install the correct version.
+    for project in projects:
+        for dirname in search_dirs:
+            # This relies on only having "universal" wheels available.
+            # The pattern could be tightened to require -py2.py3-none-any.whl.
+            files = glob.glob(os.path.join(dirname, project + '-*.whl'))
+            if files:
+                wheels.append(os.path.abspath(files[0]))
+                break
+        else:
+            # We're out of luck, so quit with a suitable error
+            logger.fatal('Cannot find a wheel for %s' % (project,))
+
+    return wheels
+
+def install_wheel(project_names, py_executable, search_dirs=None):
     if search_dirs is None:
         search_dirs = file_search_dirs()
-    found, sdist_path = _find_file(sdist, search_dirs)
-    if not found:
-        logger.fatal("Cannot find sdist %s" % (sdist,))
-        sys.exit(100)
 
-    tmpdir = tempfile.mkdtemp()
+    wheels = find_wheels(['setuptools', 'pip'], search_dirs)
+    pythonpath = os.pathsep.join(wheels)
+    findlinks = ' '.join(search_dirs)
+
+    cmd = [
+        py_executable, '-c',
+        'import sys, pip; pip.main(["install"] + sys.argv[1:])',
+    ] + project_names
+    logger.start_progress('Installing %s...' % (', '.join(project_names)))
+    logger.indent += 2
     try:
-        tar = tarfile.open(sdist_path)
-        tar.extractall(tmpdir)
-        tar.close()
-        srcdir = os.path.join(tmpdir, os.listdir(tmpdir)[0])
-        cmd = [py_executable, 'setup.py', 'install',
-            '--single-version-externally-managed',
-            '--record', 'record']
-        logger.start_progress('Installing %s...' % project_name)
-        logger.indent += 2
-        try:
-            call_subprocess(cmd, show_stdout=False, cwd=srcdir,
-                    filter_stdout=filter_install_output)
-        finally:
-            logger.indent -= 2
-            logger.end_progress()
+        call_subprocess(cmd, show_stdout=False,
+            extra_env = {
+                'PYTHONPATH': pythonpath,
+                'PIP_FIND_LINKS': findlinks,
+                'PIP_USE_WHEEL': '1',
+                'PIP_PRE': '1',
+                'PIP_NO_INDEX': '1'
+            }
+        )
     finally:
-        shutil.rmtree(tmpdir)
+        logger.indent -= 2
+        logger.end_progress()
 
 def create_environment(home_dir, site_packages=False, clear=False,
                        unzip_setuptools=False,
@@ -960,9 +976,10 @@ def create_environment(home_dir, site_packages=False, clear=False,
     install_distutils(home_dir)
 
     if not no_setuptools:
-        install_sdist('Setuptools', 'setuptools-*.tar.gz', py_executable, search_dirs)
+        to_install = ['setuptools']
         if not no_pip:
-            install_sdist('Pip', 'pip-*.tar.gz', py_executable, search_dirs)
+            to_install.append('pip')
+        install_wheel(to_install, py_executable, search_dirs)
 
     install_activate(home_dir, bin_dir, prompt)
 
@@ -1376,7 +1393,7 @@ def install_python(home_dir, lib_dir, inc_dir, bin_dir, site_packages, clear, sy
             if symlink:
                 os.symlink(py_executable_base, full_pth)
             else:
-                shutil.copyfile(py_executable_base, full_pth)
+                copyfile(py_executable, full_pth, symlink)
 
     if is_win and ' ' in py_executable:
         # There's a bug with subprocess on Windows when using a first
@@ -1507,9 +1524,8 @@ def fix_local_scheme(home_dir, symlink=True):
                 for subdir_name in os.listdir(home_dir):
                     if subdir_name == 'local':
                         continue
-                    cp_or_ln = (os.symlink if symlink else copyfile)
-                    cp_or_ln(os.path.abspath(os.path.join(home_dir, subdir_name)), \
-                                                            os.path.join(local_path, subdir_name))
+                    copyfile(os.path.abspath(os.path.join(home_dir, subdir_name)), \
+                                                            os.path.join(local_path, subdir_name), symlink)
 
 def fix_lib64(lib_dir, symlink=True):
     """
@@ -1982,21 +1998,22 @@ D/Ncozgn13vJvsznr7DnkJWXsyMH7e42ljdJ+aqNDF1bFnKWFLdj31xtaJYK6EXFgqmV/ymD/ROG
 
 ##file activate.fish
 ACTIVATE_FISH = convert("""
-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
+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
+32XS1ITj/qLjN72ob0hc5C9bzw8MhfmL
 """)
 
 ##file activate.csh
